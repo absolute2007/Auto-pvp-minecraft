@@ -264,19 +264,37 @@ class ClickerEngine:
     def set_enabled(self, enabled: bool):
         self.enabled = enabled
     
+    def _precise_sleep(self, seconds: float):
+        """Высокоточное ожидание с использованием busy-wait для точности"""
+        if seconds <= 0:
+            return
+        
+        # Используем QueryPerformanceCounter для высокой точности
+        end_time = time.perf_counter() + seconds
+        
+        # Сначала sleep для основной части (экономит CPU)
+        if seconds > 0.002:
+            time.sleep(seconds - 0.002)
+        
+        # Затем busy-wait для точности последних миллисекунд
+        while time.perf_counter() < end_time:
+            pass
+    
     def _send_click(self, is_left: bool):
         """Отправляет клик - пробует несколько методов"""
+        # Минимальная фиксированная задержка между down/up (10ms - достаточно для регистрации)
+        CLICK_HOLD_TIME = 0.010
         
         # Метод 1: PostMessage в окно Minecraft (если найдено)
         if self.minecraft_hwnd:
             try:
                 if is_left:
                     ctypes.windll.user32.PostMessageW(self.minecraft_hwnd, self.WM_LBUTTONDOWN, 0x0001, 0)
-                    time.sleep(random.uniform(0.020, 0.040))
+                    self._precise_sleep(CLICK_HOLD_TIME)
                     ctypes.windll.user32.PostMessageW(self.minecraft_hwnd, self.WM_LBUTTONUP, 0, 0)
                 else:
                     ctypes.windll.user32.PostMessageW(self.minecraft_hwnd, self.WM_RBUTTONDOWN, 0x0002, 0)
-                    time.sleep(random.uniform(0.020, 0.040))
+                    self._precise_sleep(CLICK_HOLD_TIME)
                     ctypes.windll.user32.PostMessageW(self.minecraft_hwnd, self.WM_RBUTTONUP, 0, 0)
                 return
             except:
@@ -285,45 +303,73 @@ class ClickerEngine:
         # Метод 2: mouse_event (fallback)
         if is_left:
             ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)
-            time.sleep(random.uniform(0.020, 0.040))
+            self._precise_sleep(CLICK_HOLD_TIME)
             ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)
         else:
             ctypes.windll.user32.mouse_event(0x0008, 0, 0, 0, 0)
-            time.sleep(random.uniform(0.020, 0.040))
+            self._precise_sleep(CLICK_HOLD_TIME)
             ctypes.windll.user32.mouse_event(0x0010, 0, 0, 0, 0)
     
     def _click_loop(self):
-        """Основной цикл кликов"""
+        """Основной цикл кликов с высокоточным таймингом"""
         set_thread_high_priority()
+        
+        # Время следующего клика для каждой кнопки
+        next_left_click = 0.0
+        next_right_click = 0.0
         
         while self.running:
             if self.enabled:
+                current_time = time.perf_counter()
                 left_held = bool(ctypes.windll.user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
                 right_held = bool(ctypes.windll.user32.GetAsyncKeyState(VK_RBUTTON) & 0x8000)
                 
-                if left_held or right_held:
-                    target_cps = self.left_cps if left_held else self.right_cps
-                    randomize_val = self.left_randomize if left_held else self.right_randomize
-                    
-                    # Если нажаты оба, приоритет у ЛКМ (или можно чередовать, но пока так)
-                    if left_held:
+                clicked = False
+                
+                # Обработка ЛКМ
+                if left_held:
+                    if current_time >= next_left_click:
                         self._send_click(is_left=True)
-                    elif right_held:
-                        self._send_click(is_left=False)
-                    
-                    # Интервал
-                    base_interval = 1.0 / target_cps
-                    
-                    if self.randomization_enabled and randomize_val > 0:
-                        delta = base_interval * (randomize_val / 100.0)
-                        interval = base_interval + random.uniform(-delta, delta)
-                        interval = max(0.010, interval) # Защита от слишком малых значений
-                    else:
-                        interval = base_interval
-                    
-                    time.sleep(interval)
+                        clicked = True
+                        
+                        # Вычисляем интервал
+                        base_interval = 1.0 / self.left_cps
+                        if self.randomization_enabled and self.left_randomize > 0:
+                            delta = base_interval * (self.left_randomize / 100.0)
+                            interval = base_interval + random.uniform(-delta, delta)
+                            interval = max(0.010, interval)
+                        else:
+                            interval = base_interval
+                        
+                        next_left_click = current_time + interval
                 else:
-                    time.sleep(0.005)
+                    # Сброс таймера при отпускании
+                    next_left_click = 0.0
+                
+                # Обработка ПКМ
+                if right_held:
+                    if current_time >= next_right_click:
+                        self._send_click(is_left=False)
+                        clicked = True
+                        
+                        # Вычисляем интервал
+                        base_interval = 1.0 / self.right_cps
+                        if self.randomization_enabled and self.right_randomize > 0:
+                            delta = base_interval * (self.right_randomize / 100.0)
+                            interval = base_interval + random.uniform(-delta, delta)
+                            interval = max(0.010, interval)
+                        else:
+                            interval = base_interval
+                        
+                        next_right_click = current_time + interval
+                else:
+                    # Сброс таймера при отпускании
+                    next_right_click = 0.0
+                
+                # Короткое ожидание для проверки состояния (высокоточное)
+                if not clicked:
+                    # Busy-wait для минимальной задержки
+                    time.sleep(0.001)
             else:
                 time.sleep(0.01)
     
